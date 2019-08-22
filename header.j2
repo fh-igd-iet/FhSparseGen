@@ -1,0 +1,235 @@
+// The Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V., Hansastrasse 27c, 80686 Munich, Germany (further: Fraunhofer) is holder of all proprietary rights on this computer program.
+//
+// Copyright©2019 Gesellschaft zur Förderung der angewandten Forschung e.V. acting on behalf of its Fraunhofer Institut für Graphische Datenverarbeitung. All rights reserved.
+//
+// Contact: andre.stork@igd.fraunhofer.de
+
+#pragma once
+
+#include <cassert>
+#include <cstddef>
+{% if index_type.endswith('8_t') or index_type.endswith('16_t') or index_type.endswith('32_t') or index_type.endswith('64_t') or index_type.endswith('max_t') or index_type.endswith('ptr_t') %}
+#include <cstdint>
+{% endif %}
+{% if outer == 'blocked' %}
+#include <vector>
+{% endif %}
+#include <string>
+#include <memory>
+
+{% if cuda %}
+#include <cuda_runtime_api.h>
+
+namespace {{ matrix_name }}Helper {
+struct cuda_deleter { void operator()(void * p) const { cudaFree(p); }};
+{% macro unique_ptr(T) -%}
+std::unique_ptr<{{ T }}[], {{ matrix_name }}Helper::cuda_deleter>
+{%- endmacro %}
+
+template<typename T>
+{{ unique_ptr('T') }} make_array(std::size_t n)
+{
+	if(!n) return nullptr;
+	void * ret = nullptr;
+	cudaMalloc(&ret, sizeof(T) * n);
+	if(!ret)
+		throw std::bad_alloc();
+	return std::unique_ptr<T[], cuda_deleter>{reinterpret_cast<T *>(ret)};
+}
+
+template<typename T>
+void typed_copy(T * out, T const * in, std::size_t n)
+{
+	cudaMemcpy(out, in, sizeof(T) * n, cudaMemcpyDeviceToDevice);
+}
+
+template<typename T>
+void typed_copy_to_device(T * out, T const * in, std::size_t n)
+{
+	cudaMemcpy(out, in, sizeof(T) * n, cudaMemcpyHostToDevice);
+}
+
+template<typename T>
+void typed_copy_to_host(T * out, T const * in, std::size_t n)
+{
+	cudaMemcpy(out, in, sizeof(T) * n, cudaMemcpyDeviceToHost);
+}
+{% else %}
+namespace {{ matrix_name }}Helper {
+{% macro unique_ptr(T) -%}
+std::unique_ptr<{{ T }}[]>
+{%- endmacro %}
+template<typename T>
+{{ unique_ptr('T') }} make_array(std::size_t n)
+{
+	if(!n) return nullptr;
+	return std::make_unique<T[]>(n);
+}
+
+template<typename T>
+void typed_copy(T * out, T const * in, std::size_t n) { std::memcpy(out, in, sizeof(T) * n); }
+
+template<typename T>
+void typed_copy_to_device(T * out, T const * in, std::size_t n) { std::memcpy(out, in, sizeof(T) * n); }
+
+template<typename T>
+void typed_copy_to_host(T * out, T const * in, std::size_t n) { std::memcpy(out, in, sizeof(T) * n); }
+{% endif %}
+}
+
+struct alignas({{ alignment }}) {{ value_name }} final
+{
+	{% if members|length %}
+#ifdef __GNUC__
+	#pragma GCC diagnostic push
+	#pragma GCC diagnostic ignored "-Weffc++"
+#endif
+#ifdef __CUDACC__
+	__host__
+	__device__
+#endif
+	{{ value_name }}() {}
+#ifdef __CUDACC__
+	__host__
+	__device__
+#endif
+#ifdef __GNUC__
+	#pragma GCC diagnostic pop
+#endif
+	{% endif %}
+	{%+ if members|length == 1 %}explicit {% endif %}{{ value_name }}({% for member in members %}{% if not loop.first %}, {% endif %}{{ member.type }} {{ member.name }}_{% endfor %})
+		{% for member in members %}
+		{%+ if loop.first %}:{% else %},{% endif %} {{ member.name }}({{ member.name}}_)
+		{% endfor %}
+	{}
+
+	{% for member in members %}
+	{{ member.type }} {{ member.name }};
+	{% endfor %}
+};
+{% if value_name != vector_value_name %}
+
+struct alignas({{ vector_alignment }}) {{ vector_value_name }} final
+{
+	{% if vector_members|length %}
+#ifdef __GNUC__
+	#pragma GCC diagnostic push
+	#pragma GCC diagnostic ignored "-Weffc++"
+#endif
+#ifdef __CUDACC__
+	__host__
+	__device__
+#endif
+	{{ vector_value_name }}() {}
+#ifdef __CUDACC__
+	__host__
+	__device__
+#endif
+#ifdef __GNUC__
+	#pragma GCC diagnostic pop
+#endif
+	{% endif %}
+	{%+ if vector_members|length == 1 %}explicit {% endif %}{{ vector_value_name }}({% for member in vector_members %}{% if not loop.first %}, {% endif %}{{ member.type }} {{ member.name }}_{% endfor %})
+		{% for member in vector_members %}
+		{%+ if loop.first %}:{% else %},{% endif %} {{ member.name }}({{ member.name}}_)
+		{% endfor %}
+	{}
+
+	{% for member in vector_members %}
+	{{ member.type }} {{ member.name }};
+	{% endfor %}
+};
+{% endif %}
+
+struct {{ matrix_name }};
+struct {{ vector_name }} final
+{
+	{{ vector_name }}() noexcept;
+	{{ vector_name }}({{ vector_name }} const & o);
+	{{ vector_name }}({{ vector_name }} && o) noexcept;
+	{{ vector_name }}({{ index_type }} numValues, {{ vector_value_name }} const * values);
+	explicit {{ vector_name }}({{ index_type }} numValues);
+	~{{ vector_name }}();
+
+	{{ vector_name }} & operator=({{ vector_name }} const & o) &;
+	{{ vector_name }} & operator=({{ vector_name }} && o) & noexcept;
+
+	{{ index_type }} values() const noexcept { return valuesTrimmed_; }
+
+	friend bool compare({{ vector_name }} const & lhs, {{ vector_name }} const & rhs, long double relativeEpsilon = 1e-6, long double absoluteEpsilon = 1e-16, bool printMismatch = false);
+
+private:
+	friend void multiply_into({{ vector_name }} & y, {{ matrix_name }} const & A, {{ vector_name }} const & x);
+
+	{{ index_type }} values_ = 0, valuesTrimmed_ = 0;
+
+	{% if vector_layout == 'interleaved' %}
+	{{ unique_ptr(vector_value_name) }} valueData_;
+	{% else %}
+	{% for member in vector_members %}
+	{{ unique_ptr(member.type) }} {{ member.name }}Values_;
+	{% endfor %}
+	{% endif %}
+};
+
+struct {{ matrix_name }} final
+{
+	struct Entry;
+
+	{{ matrix_name }}() noexcept;
+	{{ matrix_name }}({{ matrix_name }} const & o);
+	{{ matrix_name }}({{ matrix_name }} && o) noexcept;
+	{{ matrix_name }}({{ index_type }} numRows, {{ index_type }} numColumns, {{ index_type }} numEntries, Entry * entries);
+	~{{ matrix_name }}();
+	{{ matrix_name }} & operator=({{ matrix_name }} const & o) &;
+	{{ matrix_name }} & operator=({{ matrix_name }} && o) & noexcept;
+
+	{{ index_type }} rows() const noexcept { return rowsTrimmed_; }
+	{{ index_type }} cols() const noexcept { return cols_; }
+	{{ index_type }} values() const noexcept { return values_; }
+
+#ifdef _MSC_VER
+	#pragma warning(push)
+	#pragma warning(disable:4324)
+#endif
+	struct Entry final
+	{
+		#ifdef __GNUC__
+		#pragma GCC diagnostic push
+		#pragma GCC diagnostic ignored "-Weffc++"
+		#endif
+		Entry() {}
+		#ifdef __GNUC__
+		#pragma GCC diagnostic pop
+		#endif
+		Entry({{ index_type }} row_, {{ index_type }} col_, {{ value_name }} value_)
+			: row(row_)
+			, col(col_)
+			, value(value_)
+		{}
+		{{ index_type }} row, col;
+		{{ value_name }} value;
+	};
+#ifdef _MSC_VER
+	#pragma warning(pop)
+#endif
+
+private:
+	friend void multiply_into({{ vector_name }} & y, {{ matrix_name }} const & A, {{ vector_name }} const & x);
+
+	{{ index_type }} {%if outer == 'blocked' %}bins_ = 0, {% endif %}rows_ = 0, rowsTrimmed_ = 0, cols_ = 0, {% if outer == 'transposed' %}maxCols_ = 0, {% endif %}values_ = 0;
+
+	{% if outer == 'transposed' %}
+	{{ unique_ptr(index_type) }} rowColData_;
+	{% else %}
+	{{ unique_ptr(index_type) }} offsetData_;
+	{% endif %}
+	{{ unique_ptr(index_type) }} columnData_;
+	{% if inner == 'interleaved' %}
+	{{ unique_ptr(value_name) }} valueData_;
+	{% else %}
+	{% for member in members %}
+	{{ unique_ptr(member.type) }} {{ member.name }}Values_;
+	{% endfor %}
+	{% endif %}
+};

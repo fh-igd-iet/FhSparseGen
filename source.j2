@@ -1,0 +1,642 @@
+// The Fraunhofer-Gesellschaft zur Förderung der angewandten Forschung e.V., Hansastrasse 27c, 80686 Munich, Germany (further: Fraunhofer) is holder of all proprietary rights on this computer program.
+//
+// Copyright©2019 Gesellschaft zur Förderung der angewandten Forschung e.V. acting on behalf of its Fraunhofer Institut für Graphische Datenverarbeitung. All rights reserved.
+//
+// Contact: andre.stork@igd.fraunhofer.de
+
+#include "{{ header_name }}"
+{% macro unique_ptr(T) -%}
+std::unique_ptr<{{ T }}[]{% if cuda %}, cuda_deleter{% endif %}>
+{%- endmacro %}
+
+#include <algorithm>
+#include <memory>
+#include <numeric>
+{% if members %}
+#include <type_traits>
+{% endif %}
+#include <utility>
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+{% if outer == 'blocked' %}
+#include <vector>
+{% endif %}
+#include <tuple>
+#include <iostream>
+#include <array>
+#include <fstream>
+#include <limits>
+#include <vector>
+{# {% if members and not cuda %}{# nvcc considers doubles not trivially destructible... #}
+
+{% for member_type in members|map(attribute='type')|unique %}
+static_assert(std::is_trivially_copyable<{{member_type}}>::value, "{{member_type}} must be trivially copyable");
+static_assert(std::is_trivially_destructible<{{member_type}}>::value, "{{member_type}} must be trivially destructible");
+{% endfor %}
+{# {% endif %} #}
+
+using namespace {{ matrix_name }}Helper;
+
+bool compare({{ vector_name }} const & lhs, {{ vector_name }} const & rhs, long double relativeEpsilon, long double absoluteEpsilon, bool printMismatch)
+{
+	if(rhs.values() != lhs.values())
+		return false;
+
+	auto n = rhs.values();
+
+	{% if vector_layout == "interleaved" %}
+	std::vector<{{ vector_value_name }}> lhsValues, rhsValues;
+	lhsValues.resize(n);
+	rhsValues.resize(n);
+	typed_copy_to_host(lhsValues.data(), lhs.valueData_.get(), n);
+	typed_copy_to_host(rhsValues.data(), rhs.valueData_.get(), n);
+
+	for(std::size_t i = 0; i < rhsValues.size(); ++i)
+	{
+		{% for member in vector_members %}
+		if(std::abs(lhsValues[i].{{ member.name }} - rhsValues[i].{{ member.name }}) > relativeEpsilon * std::max(std::abs(lhsValues[i].{{ member.name }}), std::abs(rhsValues[i].{{ member.name }}))
+			&& std::abs(lhsValues[i].{{ member.name }} - rhsValues[i].{{ member.name }}) > absoluteEpsilon)
+		{
+			if(printMismatch)
+			{
+				std::fprintf(stderr, "mismatch at %zu in {{ member.name }}\n", i);
+				std::fprintf(stderr, "%.20g != %.20g\n", lhsValues[i].{{ member.name }}, rhsValues[i].{{ member.name }});
+			}
+			return false;
+		}
+		{% endfor %}
+	}
+
+	{% else %}
+	{% for member in vector_members %}
+	{
+		std::vector<{{ member.type }}> rhsValues{{ member.name }}, lhsValues{{ member.name }};
+		lhsValues{{ member.name }}.resize(n);
+		rhsValues{{ member.name }}.resize(n);
+		typed_copy_to_host(lhsValues{{ member.name }}.data(), lhs.{{ member.name }}Values_.get(), n);
+		typed_copy_to_host(rhsValues{{ member.name }}.data(), rhs.{{ member.name }}Values_.get(), n);
+
+		for(std::size_t i = 0; i < lhsValues{{ member.name }}.size(); ++i)
+		{
+			if(std::abs(lhsValues{{ member.name }}[i] - rhsValues{{ member.name }}[i]) > relativeEpsilon * std::max(std::abs(lhsValues{{ member.name }}[i]), std::abs(rhsValues{{ member.name }}[i]))
+				&& std::abs(lhsValues{{ member.name }}[i] - rhsValues{{ member.name }}[i]) > absoluteEpsilon)
+			{
+				if(printMismatch)
+				{
+					std::fprintf(stderr, "mismatch at %zu in {{ member.name }}\n", i);
+					std::fprintf(stderr, "%.20g != %.20g\n", lhsValues{{ member.name }}[i], rhsValues{{ member.name }}[i]);
+				}
+				return false;
+			}
+		}
+	}
+
+	{% endfor %}
+	{% endif %}
+	return true;
+}
+
+{{ vector_name }}::{{ vector_name }}() noexcept = default;
+
+{{ vector_name }}::{{ vector_name }}({{ vector_name }} const & o)
+	: {{ vector_name }}()
+{
+	*this = o;
+}
+
+{{ vector_name }}::{{ vector_name }}({{ vector_name }} && o) noexcept
+	: {{ vector_name }}()
+{
+	*this = std::move(o);
+}
+
+{{ vector_name }}::{{ vector_name }}({{ index_type }} numValues, {{ vector_value_name }} const *{% if members %} values{% endif %})
+	: {{ vector_name }}(numValues)
+{
+	if(!numValues) return;
+
+	{% if vector_layout == 'interleaved' %}
+	typed_copy_to_device(valueData_.get(), values, numValues);
+	{% else %}
+	{% if cuda %}
+	{% for member in vector_members %}
+	cudaMemcpy2D(
+		{{ member.name }}Values_.get(), sizeof({{ member.type }}),
+		&(values[0].{{ member.name }}), sizeof({{ vector_value_name }}),
+		sizeof({{ member.type }}), numValues,
+		cudaMemcpyHostToDevice
+	);
+	{% endfor %}
+	{% else %}
+	{{ index_type }} valueOffset = 0;
+	for(auto it = values, last = values + numValues; it != last; ++it, ++valueOffset)
+	{
+		{% for member in vector_members %}
+		{{ member.name }}Values_[valueOffset] = it->{{ member.name }};
+		{% endfor %}
+	}
+	{% endif %}
+	{% endif %}
+}
+
+{{ vector_name }}::{{ vector_name }}({{ index_type }} numValues)
+	: values_(32 * (numValues / 32 + (numValues % 32 != 0)))
+	, valuesTrimmed_(numValues)
+	{% if vector_layout == 'interleaved' %}
+	, valueData_(make_array<{{ vector_value_name }}>(values_))
+	{% else %}
+	{% for member in vector_members %}
+	, {{ member.name }}Values_(make_array<{{ member.type }}>(values_))
+	{% endfor %}
+	{% endif %}
+{}
+
+{{ vector_name }}::~{{ vector_name }}() = default;
+
+{{ vector_name }} & {{ vector_name }}::operator=({{ vector_name }} const & o) &
+{
+	if(values_ != o.values_)
+		*this = {{ vector_name }}(o.valuesTrimmed_);
+	valuesTrimmed_ = o.valuesTrimmed_;
+
+	if(!values_) return *this;
+
+	{% if vector_layout == 'interleaved' %}
+	typed_copy(valueData_.get(), o.valueData_.get(), valuesTrimmed_);
+	{% else %}
+	{% for member in vector_members %}
+	typed_copy({{ member.name }}Values_.get(), o.{{ member.name }}Values_.get(), valuesTrimmed_);
+	{% endfor %}
+	{% endif %}
+
+	return *this;
+}
+
+{{ vector_name }} & {{ vector_name }}::operator=({{ vector_name }} && o) & noexcept
+{
+	std::swap(values_, o.values_);
+	std::swap(valuesTrimmed_, o.valuesTrimmed_);
+
+	{% if vector_layout == 'interleaved' %}
+	std::swap(valueData_, o.valueData_);
+	{% else %}
+	{% for member in vector_members %}
+	std::swap({{ member.name }}Values_, o.{{ member.name }}Values_);
+	{% endfor %}
+	{% endif %}
+
+	return *this;
+}
+
+{{ matrix_name }}::{{ matrix_name }}() noexcept = default;
+
+{{ matrix_name }}::{{ matrix_name }}({{ matrix_name }} const & o)
+	: {{ matrix_name }}()
+{
+	*this = o;
+}
+
+{{ matrix_name }}::{{ matrix_name }}({{ matrix_name }} && o) noexcept
+	: {{ matrix_name }}()
+{
+	*this = std::move(o);
+}
+
+{{ matrix_name }}::{{ matrix_name }}({{ index_type }} numRows, {{ index_type }} numColumns, {{ index_type }} numEntries, Entry * entries)
+	: {{ matrix_name }}()
+{
+	rows_ = 32 * (numRows / 32 + (numRows % 32 != 0));
+	rowsTrimmed_ = numRows;
+	cols_ = numColumns;
+	{% if outer == 'blocked' %}
+	bins_ = (rows_ + {{blockSize}} - 1) / {{blockSize}};
+	assert(bins_ * {{blockSize}} == rows_);
+	{% endif %}
+
+	std::sort(
+		entries, entries + numEntries,
+		[] (Entry const & a, Entry const & b) {
+			return a.row < b.row || (a.row == b.row && a.col < b.col);
+		}
+	);
+
+	std::vector<{{ index_type }}> rowCols(rows_);
+	std::vector<{{ index_type }}> rowOffsets(rows_ + 1);
+	for(auto it = entries, last = entries + numEntries; it != last; ++it)
+		rowCols[it->row] += 1;
+	std::partial_sum(rowCols.begin(), rowCols.end(), rowOffsets.begin() + 1);
+
+	for({{ index_type }} row = 0; row < rows_; ++row)
+	{
+		auto it = rowOffsets[row], last = rowOffsets[row + 1];
+		if(it == last) continue;
+		auto * e = &entries[it];
+		for(++it; it != last; ++it)
+		{
+			auto * e2 = &entries[it];
+			if(e->row != e2->row || e->col != e2->col)
+			{
+				e = e2;
+				continue;
+			}
+			{% for member in members %}
+			e->value.{{ member.name }} += e2->value.{{ member.name }};
+			{% endfor %}
+		}
+	}
+
+	auto isNewRow = [entries] (Entry const & e) {
+		return &e == entries || e.row != (&e - 1)->row;
+	};
+	auto isNewValue = [isNewRow] (Entry const & e) {
+		return isNewRow(e) || e.col != (&e - 1)->col;
+	};
+	numEntries = static_cast<{{ index_type }}>(std::remove_if(entries, entries + numEntries, [isNewValue] (Entry const & e) { return !isNewValue(e); } ) - entries);
+
+	std::fill(rowCols.begin(), rowCols.end(), 0);
+	for(auto it = entries, last = entries + numEntries; it != last; ++it)
+		rowCols[it->row] += 1;
+	std::partial_sum(rowCols.begin(), rowCols.end(), rowOffsets.begin() + 1);
+
+	{% if outer == 'transposed' %}
+	maxCols_ = *std::max_element(rowCols.begin(), rowCols.end());
+
+	numEntries = maxCols_ * rows_;
+	std::vector<Entry> newEntries(numEntries);
+	for({{ index_type }} row = 0; row < rows_; ++row)
+	{
+		auto it = rowOffsets[row], last = rowOffsets[row + 1], newLast = it + maxCols_, k = 0 * it;
+		for(; it != last; ++it, ++k)
+			newEntries[row + k * rows_] = entries[it];
+		for(; it != newLast; ++it, ++k)
+		{
+			newEntries[row + k * rows_] = Entry{row, 0, {}};
+			auto & r = newEntries[row + k * rows_].value;
+			{{ zero_initialize_template | indent_tab(3) }}
+		}
+	}
+	entries = newEntries.data();
+
+	maxCols_ = *std::max_element(rowCols.begin(), rowCols.end());
+	rowColData_ = make_array<{{ index_type }}>(rows_);
+	typed_copy_to_device(rowColData_.get(), rowCols.data(), rows_);
+	{% elif outer == 'blocked' %}
+	std::vector<{{ index_type }}> binCols(bins_);
+	std::vector<{{ index_type }}> binOffsets(bins_ + 1);
+	for({{ index_type }} bin = 0; bin < bins_; ++bin)
+		binCols[bin] = *std::max_element(rowCols.data() + {{ blockSize }} * bin, rowCols.data() + {{ blockSize }} * (bin + 1));
+	std::partial_sum(binCols.begin(), binCols.end(), binOffsets.begin() + 1);
+	for(auto & off : binOffsets)
+		off *= {{ blockSize }};
+
+	numEntries = binOffsets.back();
+	std::vector<Entry> newEntries(numEntries);
+	for({{ index_type }} row = 0; row < rows_; ++row)
+	{
+		auto binOffset = binOffsets[row / {{ blockSize }}];
+		auto binCol = binCols[row / {{ blockSize }}];
+		auto it = rowOffsets[row], last = rowOffsets[row + 1], newLast = it + binCol, k = 0 * it;
+		assert(it <= last && last <= newLast);
+		for(; it != last; ++it, ++k)
+			newEntries[binOffset + row % {{ blockSize}} + k * {{ blockSize }}] = entries[it];
+		for(; it != newLast; ++it, ++k)
+		{
+			newEntries[binOffset + row % {{ blockSize}} + k * {{ blockSize }}] = Entry{row, 0, {}};
+			auto & r = newEntries[binOffset + row % {{ blockSize}} + k * {{ blockSize }}].value;
+			{{ zero_initialize_template | indent_tab(3) }}
+		}
+	}
+	entries = newEntries.data();
+
+	offsetData_ = make_array<{{ index_type }}>(bins_ + 1);
+	typed_copy_to_device(offsetData_.get(), binOffsets.data(), bins_ + 1);
+	{% else %}
+	offsetData_ = make_array<{{ index_type }}>(rows_ + 1);
+	typed_copy_to_device(offsetData_.get(), rowOffsets.data(), rows_ + 1);
+	{% endif %}
+
+	values_ = numEntries;
+	columnData_ = make_array<{{ index_type }}>(numEntries);
+	{% if inner == 'interleaved' %}
+	valueData_ = make_array<{{ value_name }}>(numEntries);
+
+	{% if cuda %}
+	cudaMemcpy2D(
+		columnData_.get(), sizeof({{ index_type }}),
+		&(entries[0].col), sizeof(Entry),
+		sizeof({{ index_type }}), numEntries,
+		cudaMemcpyHostToDevice
+	);
+	cudaMemcpy2D(
+		valueData_.get(), sizeof({{ value_name }}),
+		&(entries[0].value), sizeof(Entry),
+		sizeof({{ value_name }}), numEntries,
+		cudaMemcpyHostToDevice
+	);
+	{% else %}
+	{{ index_type }} entryOffset = 0;
+	for(auto it = entries, last = entries + numEntries; it != last; ++it, ++entryOffset)
+	{
+		columnData_[entryOffset] = it->col;
+		valueData_[entryOffset] = it->value;
+	}
+	{% endif %}
+	{% else %}
+	{% for member in members %}
+	{{ member.name }}Values_ = make_array<{{ member.type }}>(numEntries);
+	{% endfor %}
+
+	{% if cuda %}
+	cudaMemcpy2D(
+		columnData_.get(), sizeof({{ index_type }}),
+		&(entries[0].col), sizeof(Entry),
+		sizeof({{ index_type }}), numEntries,
+		cudaMemcpyHostToDevice
+	);
+	{% for member in members %}
+	cudaMemcpy2D(
+		{{ member.name }}Values_.get(), sizeof({{ member.type }}),
+		&(entries[0].value.{{ member.name }}), sizeof(Entry),
+		sizeof({{ member.type }}), numEntries,
+		cudaMemcpyHostToDevice
+	);
+	{% endfor %}
+	{% else %}
+	{{ index_type }} entryOffset = 0;
+	for(auto it = entries, last = entries + numEntries; it != last; ++it, ++entryOffset)
+	{
+		columnData_[entryOffset] = it->col;
+		{% for member in members %}
+		{{ member.name }}Values_[entryOffset] = it->value.{{ member.name }};
+		{% endfor %}
+	}
+	{% endif %}
+	{% endif %}
+}
+
+{{ matrix_name }}::~{{ matrix_name }}() = default;
+
+{{ matrix_name }} & {{ matrix_name }}::operator=({{ matrix_name }} const & o) &
+{
+	{% if outer == 'transposed' %}
+	{{ unique_ptr(index_type) }} newRowColData;
+	{% else %}
+	{{ unique_ptr(index_type) }} newOffsetData;
+	{% endif %}
+	{{ unique_ptr(index_type) }} newColumnData;
+	{% if inner == 'interleaved' %}
+	{{ unique_ptr(value_name) }} newValueData;
+	{% else %}
+	{% for member in members %}
+	{{ unique_ptr(member.type) }} new{{ member.name }}Values;
+	{% endfor %}
+	{% endif %}
+
+	if({% if outer == 'blocked' %}bins_{% else %}rows_{% endif %} != {% if outer == 'blocked' %}bins_{% else %}rows_{% endif %})
+	{
+		{% if outer == 'transposed' %}
+		newRowColData = make_array<{{ index_type }}>(o.rows_);
+		{% else %}
+		newOffsetData = make_array<{{ index_type }}>({% if outer == 'blocked' %}bins_{% else %}rows_{% endif %} + 1);
+		{% endif %}
+	}
+
+	if(values_ != o.values_)
+	{
+		newColumnData = make_array<{{ index_type }}>(o.values_);
+		{% if inner == 'interleaved' %}
+		newValueData = make_array<{{ value_name }}>(o.values_);
+		{% else %}
+		{% for member in members %}
+		new{{ member.name }}Values = make_array<{{ member.type }}>(o.values_);
+		{% endfor %}
+		{% endif %}
+	}
+
+	{% if outer == 'blocked' %}
+	bins_ = o.bins_;
+	{% endif %}
+	rows_ = o.rows_;
+	rowsTrimmed_ = o.rowsTrimmed_;
+	cols_ = o.cols_;
+	{% if outer == 'transposed' %}
+	maxCols_ = o.maxCols_;
+	{% endif %}
+	values_ = o.values_;
+
+	{% if outer == 'transposed' %}
+	if(newRowColData) rowColData_ = std::move(newRowColData);
+	typed_copy(rowColData_.get(), o.rowColData_.get(), o.rows_);
+	{% else %}
+	if(newOffsetData) offsetData_ = std::move(newOffsetData);
+	typed_copy(offsetData_.get(), o.offsetData_.get(), o.{% if outer == 'blocked' %}bins_{% else %}rows_{% endif %} + 1);
+	{% endif %}
+
+	{% if inner == 'interleaved' %}
+	if(newValueData) valueData_ = std::move(newValueData);
+	typed_copy(valueData_.get(), o.valueData_.get(), o.values_);
+	{% else %}
+	{% for member in members %}
+	if(new{{ member.name }}Values) {{ member.name }}Values_ = std::move(new{{ member.name }}Values);
+	typed_copy({{ member.name }}Values_.get(), {{ member.name }}Values_.get(), o.values_);
+	{% endfor %}
+	{% endif %}
+
+	return *this;
+}
+
+{{ matrix_name }} & {{ matrix_name }}::operator=({{ matrix_name }} && o) & noexcept
+{
+	{% if outer == 'blocked' %}
+	std::swap(bins_, o.bins_);
+	{% endif %}
+	std::swap(rows_, o.rows_);
+	std::swap(rowsTrimmed_, o.rowsTrimmed_);
+	std::swap(cols_, o.cols_);
+	{% if outer == 'transposed' %}
+	std::swap(maxCols_, o.maxCols_);
+	{% endif %}
+	std::swap(values_, o.values_);
+
+	{% if outer == 'transposed' %}
+	std::swap(rowColData_, o.rowColData_);
+	{% else %}
+	std::swap(offsetData_, o.offsetData_);
+	{% endif %}
+	std::swap(columnData_, o.columnData_);
+	{% if inner == 'interleaved' %}
+	std::swap(valueData_, o.valueData_);
+	{% else %}
+	{% for member in members %}
+	std::swap({{ member.name }}Values_, o.{{ member.name }}Values_);
+	{% endfor %}
+	{% endif %}
+
+	return *this;
+}
+
+{% if cuda %}
+static
+__launch_bounds__({{ scheduling.cuda.threads }}, {{ scheduling.cuda.blocks_per_mp }})
+__global__
+void multiply_into_kernel({{ index_type }} rows, {{ index_type }} cols
+	{%- if scheduling.cuda.schedule == 'dynamic' %}, {{ index_type }} * rowCounter{% endif -%}
+	{%- if vector_layout == 'interleaved' %}, {{ vector_value_name }} * valuesY{% else %}{% for member in vector_members %}, {{ member.type }} * {{ member.name }}ValuesY{% endfor %}{% endif -%}
+	{%- if outer == 'transposed' %}, {{ index_type }} const * rowColsA{% else %}, {{ index_type }} const * offsetsA{% endif -%}
+	, {{ index_type }} const * columnsA
+	{%- if inner == 'interleaved' %}, {{ value_name }} const * valuesA{% else %}{% for member in members %}, {{ member.type }} const * {{ member.name }}ValuesA{% endfor %}{% endif -%}
+	{%- if vector_layout == 'interleaved' %}, {{ vector_value_name }} const * __restrict__ valuesX{% else %}{% for member in vector_members %}, {{ member.type }} const * __restrict__ {{ member.name }}ValuesX{% endfor %}{% endif -%}
+)
+{
+	{% if scheduling.cuda.schedule == 'dynamic' %}
+	__shared__ {{ index_type }} rowOffset;
+	if(threadIdx.x == 0)
+		rowOffset = atomicAdd(rowCounter, {{ scheduling.cuda.threads }});
+	__syncthreads();
+	{% else %}
+	auto rowOffset = {{ scheduling.cuda.threads }} * blockIdx.x;
+	{% endif %}
+	while(rowOffset < rows)
+	{
+		auto row = rowOffset + threadIdx.x;
+		if(row < rows)
+		{
+			{{ vector_value_name }} r;
+			{{ vector_zero_initialize_template | indent_tab(3) }}
+
+			{% if outer == 'transposed' %}
+			#pragma unroll(1)
+			for(auto first = row, last = row + rows * rowColsA[row]; first < last; first += rows)
+			{% elif outer == 'blocked' %}
+			const {{ index_type }} bin = row / {{ blockSize }};
+			{{ index_type }} first = offsetsA[bin] + (row & {{ blockSize - 1 }});
+			const {{ index_type }} * colp = columnsA + first;
+			const auto last = offsetsA[bin + 1];
+			#pragma unroll(1)
+			for(; first < last; first += {{ blockSize }}, colp += {{ blockSize }})
+			{% else %}
+			#pragma unroll(1)
+			for(auto first = offsetsA[row], last = offsetsA[row + 1]; first < last; ++first)
+			{% endif %}
+			{
+				{% if outer == 'blocked' %}
+				auto col = *colp;
+				{% else %}
+				auto col = columnsA[first];
+				{% endif %}
+				assert(col < cols);
+
+				{% if inner == 'interleaved' %}
+				auto a = valuesA[first];
+				{% else %}
+				{{ value_name }} a{ {%- for member in members %}{{ member.name }}ValuesA[first]{% if not loop.last %}, {% endif %}{% endfor %}};
+				{% endif %}
+				{% if vector_layout == 'interleaved' %}
+				auto b = valuesX[col];
+				{% else %}
+				{{ vector_value_name }} b{ {%- for member in vector_members %}{{ member.name }}ValuesX[col]{% if not loop.last %}, {% endif %}{% endfor %}};
+				{% endif %}
+				{{ multiply_accumulate_template | indent_tab(4) }}
+			}
+
+			{% if vector_layout == 'interleaved' %}
+			valuesY[row] = r;
+			{% else %}
+			{% for member in vector_members %}
+			{{ member.name }}ValuesY[row] = r.{{ member.name }};
+			{% endfor %}
+			{% endif %}
+		}
+		{% if scheduling.cuda.schedule == 'dynamic' %}
+		__syncthreads();
+		if(threadIdx.x == 0)
+			rowOffset = atomicAdd(rowCounter, {{ scheduling.cuda.threads }});
+		__syncthreads();
+		{% else %}
+		rowOffset += {{ scheduling.cuda.threads * scheduling.cuda.blocks }};
+		{% endif %}
+	}
+}
+
+{% endif %}
+void multiply_into({{ vector_name }} & y, {{ matrix_name }} const & A, {{ vector_name }} const & x)
+{
+	assert(A.cols() == x.values());
+	assert(A.rows() == y.values());
+	assert(A.rows_ == y.values_);
+
+	{% if cuda %}
+	{% if scheduling.cuda.schedule == 'dynamic' %}
+	thread_local {{ index_type }} * rowCounter = nullptr;
+	if(!rowCounter)
+	{
+		cudaMalloc(reinterpret_cast<void **>(&rowCounter), sizeof({{ index_type }}));
+		if(!rowCounter)
+			throw std::bad_alloc();
+	}
+	cudaMemset(rowCounter, 0, sizeof({{ index_type }}));
+	{% endif %}
+	multiply_into_kernel<<<{{ scheduling.cuda.blocks }}, {{ scheduling.cuda.threads }}>>>(A.rows_, A.cols_
+		{%- if scheduling.cuda.schedule == 'dynamic' %}, rowCounter{% endif -%}
+		{%- if vector_layout == 'interleaved' %}, y.valueData_.get(){% else %}{% for member in vector_members %}, y.{{ member.name }}Values_.get(){% endfor %}{% endif -%}
+		{%- if outer == 'transposed' %}, A.rowColData_.get(){% else %}, A.offsetData_.get(){% endif -%}
+		, A.columnData_.get()
+		{%- if inner == 'interleaved' %}, A.valueData_.get(){% else %}{% for member in members %}, A.{{ member.name }}Values_.get(){% endfor %}{% endif -%}
+		{%- if vector_layout == 'interleaved' %}, x.valueData_.get(){% else %}{% for member in vector_members %}, x.{{ member.name }}Values_.get(){% endfor %}{% endif -%}
+	);
+	{% else %}
+	auto rows = A.rows_;
+	#pragma omp parallel for schedule({{ scheduling.omp.schedule }}{% if scheduling.omp.chunk_size %}, {{ scheduling.omp.chunk_size }}{% endif %})
+	{% if outer == 'blocked' %}
+	for(auto bin = 0; bin < A.bins_; ++bin) for(auto binRow = 0, row = bin * {{ blockSize }}; binRow < {{ blockSize }} && row < rows; ++binRow, ++row)
+	{% else %}
+	for({{ index_type }} row = 0; row < rows; ++row)
+	{% endif %}
+	{
+		{{ vector_value_name }} r;
+		{{ vector_zero_initialize_template | indent_tab(2) }}
+
+		{% if outer == 'transposed' %}
+		for(auto first = row, last = row + rows * A.rowColData_[row]; first < last; first += rows)
+		{% elif outer == 'blocked' %}
+		for(auto first = A.offsetData_[bin] + binRow, last = A.offsetData_[bin + 1]; first < last; first += {{blockSize}})
+		{% else %}
+		for(auto first = A.offsetData_[row], last = A.offsetData_[row + 1]; first < last; ++first)
+		{% endif %}
+		{
+			auto col = A.columnData_[first];
+			assert(col < A.cols_);
+			{% if inner == 'interleaved' %}
+			auto a = A.valueData_[first];
+			{% else %}
+			{{ value_name }} a{ {%- for member in members %}A.{{ member.name }}Values_[first]{% if not loop.last %}, {% endif %}{% endfor %}};
+			{% endif %}
+			{% if vector_layout == 'interleaved' %}
+			auto b = x.valueData_[col];
+			{% else %}
+			{{ vector_value_name }} b{ {%- for member in vector_members %}x.{{ member.name }}Values_[col]{% if not loop.last %}, {% endif %}{% endfor %}};
+			{% endif %}
+			{{ multiply_accumulate_template | indent_tab(3) }}
+		}
+
+		{% if vector_layout == 'interleaved' %}
+		y.valueData_[row] = r;
+		{% else %}
+		{% for member in vector_members %}
+		y.{{ member.name }}Values_[row] = r.{{ member.name }};
+		{% endfor %}
+		{% endif %}
+	}
+	{% endif %}
+}
+
+{{ vector_name }} operator*({{ matrix_name }} const & A, {{ vector_name }} const & x)
+{
+	assert(A.cols() == x.values());
+
+	{{ vector_name }} y{A.rows()};
+	multiply_into(y, A, x);
+	return y;
+}
