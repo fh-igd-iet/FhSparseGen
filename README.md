@@ -11,16 +11,41 @@ To compile the resulting code you will also need [a recent CUDA compiler and too
 
 ## Citation
 
-Mueller-Roemer, J. S., A. Stork, and D. W. Fellner.
-*Joint Schedule and Layout Autotuning for Sparse Matrices with Compound Entries on GPUs.* 2019.
-Conditionally accepted for presentation at and publication in the proceedings of the 24th International Symposium on Vision, Modeling and Visualization.
+### Journal Paper
+
+Mueller-Roemer, J. S., A. Stork, and D. Fellner.
+“Analysis of Schedule and Layout Tuning for Sparse Matrices With Compound Entries on GPUs.” 2020.
+In: Computer Graphics Forum 39(6), pp. 133–143.
+DOI: [10.1111/cgf.13957](https://doi.org/10.1111/cgf.13957).
 
 ```bibtex
-@Misc{MUELLERROEMER2019,
-  author   = {{Mueller-Roemer}, Johannes Sebastian and Stork, André and Fellner, Dieter W.},
-  title    = {Joint Schedule and Layout Autotuning for Sparse Matrices with Compound Entries on {GPUs}},
-  year     = {2019},
-  pubstate = {Conditionally accepted for presentation at and publication in the proceedings of the 24th International Symposium on Vision, Modeling and Visualization},
+@article{MUELLERROEMER2020,
+  author = {{Mueller-Roemer}, Johannes Sebastian and Stork, André and Fellner, Dieter},
+  title = {Analysis of Schedule and Layout Tuning for Sparse Matrices With Compound Entries on {GPUs}},
+  year = {2020}
+  journal = {Computer Graphics Forum},
+  volume = {39},
+  number = {6},
+  pages = {133--143},
+  doi = {10.1111/cgf.13957},
+}
+```
+
+### Conference Paper
+
+Mueller-Roemer, J. S., A. Stork, and D. W. Fellner.
+“Joint Schedule and Layout Autotuning for Sparse Matrices with Compound Entries on GPUs.” 2019.
+In: Vision, Modeling and Visualization. VMV ’19. 2019, pp. 109–116.
+DOI: [10.2312/vmv.20191324](https://doi.org/10.2312/vmv.20191324).
+
+```bibtex
+@inproceedings{MUELLERROEMER2019,
+  author = {{Mueller-Roemer}, Johannes Sebastian and Stork, André and Fellner, Dieter W.},
+  title = {Joint Schedule and Layout Autotuning for Sparse Matrices with Compound Entries on {GPUs}},
+  year = {2019},
+  booktitle = {Vision, Modeling and Visualization},
+  editor = {Schulz, Hans-Jörg and Teschner, Matthias and Wimmer, Michael},
+  doi = {10.2312/vmv.20191324}
 }
 ```
 
