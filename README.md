@@ -22,12 +22,12 @@ DOI: [10.1111/cgf.13957](https://doi.org/10.1111/cgf.13957).
 @article{MUELLERROEMER2020,
   author = {{Mueller-Roemer}, Johannes Sebastian and Stork, André and Fellner, Dieter},
   title = {Analysis of Schedule and Layout Tuning for Sparse Matrices With Compound Entries on {GPUs}},
-  year = {2020}
+  year = {2020},
   journal = {Computer Graphics Forum},
   volume = {39},
   number = {6},
   pages = {133--143},
-  doi = {10.1111/cgf.13957},
+  doi = {10.1111/cgf.13957}
 }
 ```
 
